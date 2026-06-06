@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+python-multipart
+psycopg2-binary
+requests
+google-genai
+sendgrid
