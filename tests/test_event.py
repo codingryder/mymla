@@ -69,9 +69,11 @@ def test_event_flow_skip_asset(harness):
     assert store.users[phone]["pending_flow"] is None
     assert store.users[phone]["session_data"] == {}
 
-    # Success message sent.
-    assert outbox.sent[-1][0] == "text"
+    # Success message sent, then the main menu auto-re-renders.
     assert outbox.last_body("text")
+    assert outbox.sent[-1][0] == "list"
+    menu_ids = [r["id"] for r in outbox.sent[-1][1]["sections"][0]["rows"]]
+    assert "menu:complaint" in menu_ids
 
 
 def test_event_flow_with_image_attachment(harness):
@@ -103,7 +105,9 @@ def test_event_flow_with_image_attachment(harness):
     assert invite["invite_asset_media_id"] == "wamid-fake-media-99"
     assert "Temple Festival" in invite["event_name"]
 
-    # Session cleared, success message sent.
+    # Session cleared, success message sent, then main menu re-rendered.
     assert store.users[phone]["current_step"] is None
     assert store.users[phone]["pending_flow"] is None
-    assert outbox.sent[-1][0] == "text"
+    assert outbox.sent[-1][0] == "list"
+    menu_ids = [r["id"] for r in outbox.sent[-1][1]["sections"][0]["rows"]]
+    assert "menu:complaint" in menu_ids

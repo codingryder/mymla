@@ -77,6 +77,8 @@ def _handle_window(phone: str, lang: str, user: dict, msg: dict) -> None:
     )
     db.set_field(phone, current_step=None, pending_flow=None, session_data={})
     cloud_api.send_text(phone, S.t(lang, "meeting_success"))
+    from . import menu  # deferred import: menu imports meeting
+    menu.start(phone, lang)
 
 
 def handle(phone: str, lang: str, user: dict, msg: dict) -> None:

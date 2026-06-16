@@ -62,9 +62,13 @@ def test_meeting_flow_books_appointment(harness):
     assert store.users[phone]["pending_flow"] is None
     assert store.users[phone]["session_data"] == {}
 
-    # Success message sent last.
-    assert outbox.sent[-1][0] == "text"
-    assert outbox.last_body("text")  # non-empty
+    # Success message sent, then the main menu auto-re-renders (no need for
+    # the citizen to type "menu" to get back to the hub).
+    assert outbox.last_body("text")  # success text is in the outbox somewhere
+    assert outbox.sent[-1][0] == "list"
+    menu_ids = [r["id"] for r in outbox.sent[-1][1]["sections"][0]["rows"]]
+    assert {"menu:complaint", "menu:meeting", "menu:location",
+            "menu:event", "menu:schedule"} <= set(menu_ids)
 
 
 def test_meeting_rejects_unknown_agenda(harness):
