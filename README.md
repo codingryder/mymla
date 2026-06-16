@@ -44,6 +44,21 @@ uvicorn bot:app --reload --port 8000
 Expose the local port to Meta via ngrok and register the webhook URL +
 `META_WEBHOOK_VERIFY_TOKEN` in the Meta App dashboard.
 
+## MLA office admin console
+
+The bot mounts an HTTP Basic Auth-protected admin console at `/admin/*` for
+the MLA's office to triage citizen submissions.
+
+```
+GET /admin/                    Landing page with links to each console
+GET /admin/tickets             Citizen complaints, filterable by ?status= and ?ward_id=
+                               status: ALL | OPEN | IN_PROGRESS | RESOLVED | CLOSED
+                               limit:  1–500 (default 50)
+```
+
+Set `ADMIN_USERNAME` + `ADMIN_PASSWORD` in `.env` (and on Render) before going
+live. If either is blank, every `/admin/*` request returns `503` — fail-closed.
+
 ## Seed demo data
 
 The `📍 Where is my MLA` and `📊 Program Chart` menu options read from
@@ -90,6 +105,7 @@ mymla-bot/
 ├── media.py              # Inbound media downloader
 ├── voice.py              # Sarvam STT wrapper
 ├── alerts.py             # SendGrid ops alerts
+├── admin.py              # MLA office admin console (Phase 3)
 ├── handlers/             # One module per BRD flow
 │   ├── onboarding.py     # Phase 1
 │   ├── menu.py           # Phase 2

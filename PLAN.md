@@ -34,8 +34,11 @@ one test, demo data exists. **✅ MET (28 passing)**.
 Meta is ready — get to a real conversation as fast as possible. This is where the BRD's
 vague-but-confident prose meets reality.
 
-- [ ] **1.1** Pick + deploy to a host (Render or Fly, with Neon Postgres) —
-      public HTTPS URL, env vars set, `/webhook` verified by Meta
+- [x] **1.1** Deployed to Render at https://mymla.onrender.com, Neon Postgres
+      connected, Meta Cloud API webhook verified end-to-end, signature
+      verification active. _(done 2026-06-17; using +1 555-914-8732 test
+      number from the Jantra Meta App as a smoke-testing shortcut — real number
+      registration deferred to Phase 5 prep)_
 - [ ] **1.2** Walk through **onboarding + complaint** on real phone, log every bug
       to `docs/smoke-bugs.md` — voice transcription, image upload, ward list rendering
 - [ ] **1.3** Walk through **meeting + event + location + schedule** on real phone
@@ -57,8 +60,9 @@ language toggling, etc. Cannot estimate until 1.2-1.3 produce the bug list.
 The BRD doesn't mandate this, but you can't deploy without a way for the office to
 actually handle tickets.
 
-- [ ] **3.1** Ticket viewer — CLI command or `/admin/tickets` endpoint (HTTP basic
-      auth) showing open tickets with filters
+- [x] **3.1** Ticket viewer — `/admin/tickets` HTTP-Basic-Auth endpoint with
+      status + ward filters and a paginated HTML table.
+      _(done 2026-06-17; admin.py + 10 tests, 38 total)_
 - [ ] **3.2** Ticket status updater — mark in_progress / resolved; send WhatsApp
       confirmation back to citizen
 - [ ] **3.3** Schedule editor — insert/edit rows in `mla_schedule` (CLI first)
