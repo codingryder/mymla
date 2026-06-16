@@ -44,6 +44,22 @@ uvicorn bot:app --reload --port 8000
 Expose the local port to Meta via ngrok and register the webhook URL +
 `META_WEBHOOK_VERIFY_TOKEN` in the Meta App dashboard.
 
+## Seed demo data
+
+The `📍 Where is my MLA` and `📊 Program Chart` menu options read from
+`mla_location` and `mla_schedule`. Before the MLA's office supplies real
+content, you can seed plausible demo rows:
+
+```bash
+# from repo root, with NEON_DSN populated in .env
+PYTHONPATH=. python3 scripts/seed_demo_data.py            # idempotent for location, appends to schedule
+PYTHONPATH=. python3 scripts/seed_demo_data.py --reset    # wipes both tables first
+PYTHONPATH=. python3 scripts/seed_demo_data.py --only location
+```
+
+Replace with real entries once available — keep the script as the canonical
+"what does fresh demo data look like" reference.
+
 ## Tests
 
 ```bash
@@ -82,5 +98,7 @@ mymla-bot/
 │   ├── location.py       # §7.2
 │   ├── event.py          # §7.3
 │   └── schedule.py       # §7.4
-└── tests/                # Onboarding + complaint state-machine smoke tests
+├── scripts/
+│   └── seed_demo_data.py # Seed mla_location + mla_schedule with demo rows
+└── tests/                # State-machine + security + seed-script tests
 ```
