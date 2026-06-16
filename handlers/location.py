@@ -32,3 +32,5 @@ def send(phone: str, lang: str) -> None:
     updated_str = updated_at.strftime("%d %b %Y, %H:%M") if updated_at else "—"
     card = S.t(lang, "location_card", status=status, updated_at=updated_str)
     cloud_api.send_text(phone, card)
+    from . import menu  # deferred import: menu imports location
+    menu.start(phone, lang)

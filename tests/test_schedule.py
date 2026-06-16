@@ -26,6 +26,7 @@ def test_schedule_empty_shows_no_events_message(harness):
     body = outbox.last_body("text")
     assert "Upcoming 7 Days" in body                          # header
     assert "No public programs" in body                        # empty-state copy
+    assert outbox.sent[-1][0] == "list"                        # menu auto-rendered
 
 
 def test_schedule_populated_renders_each_row(harness):
@@ -54,3 +55,4 @@ def test_schedule_populated_renders_each_row(harness):
     # Dates rendered in the "Thu 18 Jun" short form.
     assert "18 Jun" in body
     assert "20 Jun" in body
+    assert outbox.sent[-1][0] == "list"                        # menu auto-rendered

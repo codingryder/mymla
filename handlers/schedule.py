@@ -25,3 +25,5 @@ def send(phone: str, lang: str) -> None:
                     venue=r.get("venue") or "—")
             )
     cloud_api.send_text(phone, "\n".join(lines))
+    from . import menu  # deferred import: menu imports schedule
+    menu.start(phone, lang)

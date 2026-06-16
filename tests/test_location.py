@@ -32,11 +32,13 @@ def test_location_office_status(harness):
         user = store.get_user(phone)
         handlers.dispatch(phone, user, list_reply("menu:location"))
 
-    last = outbox.last("text")
-    assert last is not None
-    body = last[1]["body"]
+    last_text = outbox.last("text")
+    assert last_text is not None
+    body = last_text[1]["body"]
     assert "constituency office" in body  # English "office" status string
     assert "16 Jun 2026" in body            # updated_at formatted in the card
+    # Main menu list should auto-re-render after the location card.
+    assert outbox.sent[-1][0] == "list"
 
 
 def test_location_assembly_status(harness):
@@ -53,6 +55,7 @@ def test_location_assembly_status(harness):
 
     body = outbox.last_body("text")
     assert "Legislative Assembly" in body
+    assert outbox.sent[-1][0] == "list"
 
 
 def test_location_inspection_status_includes_ward_name(harness):
@@ -71,3 +74,4 @@ def test_location_inspection_status_includes_ward_name(harness):
     body = outbox.last_body("text")
     assert "inspection" in body.lower()
     assert "Valiyathura" in body  # Ward 12 per wards.py
+    assert outbox.sent[-1][0] == "list"
