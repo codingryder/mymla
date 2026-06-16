@@ -51,9 +51,13 @@ def get_connection() -> psycopg2.extensions.connection:
         keepalives_idle=30,
         keepalives_interval=10,
         keepalives_count=3,
-        options=f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
     )
     _conn.autocommit = False
+    # Neon's pooled DSN (PgBouncer) rejects `statement_timeout` as a startup
+    # parameter, so set it as a session SET after the connection is open.
+    with _conn.cursor() as cur:
+        cur.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
+    _conn.commit()
     return _conn
 
 
