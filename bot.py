@@ -63,7 +63,7 @@ async def timing(request: Request, call_next):
 
 # ─── Healthcheck ────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root() -> dict:
     # Touch the DB so uptime pings warm Neon's compute too, not just the web service.
     db_ok = True

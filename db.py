@@ -18,6 +18,7 @@ import json
 import os
 import random
 import string
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,8 +30,12 @@ import psycopg2.extras
 
 _CONNECT_TIMEOUT_S = 10
 _STATEMENT_TIMEOUT_MS = 30_000
+# Skip the SELECT 1 ping if the connection was verified within this window —
+# protects the hot webhook path while still catching server-side reaps.
+_VERIFY_INTERVAL_S = 30
 
 _conn: psycopg2.extensions.connection | None = None
+_conn_verified_at: float = 0.0
 
 
 def _dsn() -> str:
@@ -40,10 +45,35 @@ def _dsn() -> str:
     return dsn
 
 
+def _is_alive(conn: psycopg2.extensions.connection) -> bool:
+    """Ping with SELECT 1. Catches Neon/PgBouncer reaping the connection
+    server-side — psycopg2 leaves `conn.closed == 0` in that case until the
+    first query actually fails."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.commit()
+        return True
+    except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+        print(f"[DB] stale connection: {type(e).__name__}: {e}", flush=True)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
 def get_connection() -> psycopg2.extensions.connection:
-    global _conn
+    global _conn, _conn_verified_at
+    now = time.monotonic()
     if _conn is not None and not _conn.closed:
-        return _conn
+        if now - _conn_verified_at < _VERIFY_INTERVAL_S:
+            return _conn
+        if _is_alive(_conn):
+            _conn_verified_at = now
+            return _conn
+        # fall through to reconnect
     _conn = psycopg2.connect(
         _dsn(),
         connect_timeout=_CONNECT_TIMEOUT_S,
@@ -58,6 +88,7 @@ def get_connection() -> psycopg2.extensions.connection:
     with _conn.cursor() as cur:
         cur.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
     _conn.commit()
+    _conn_verified_at = now
     return _conn
 
 
