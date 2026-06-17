@@ -14,8 +14,10 @@ from fastapi.testclient import TestClient
 def client(monkeypatch):
     monkeypatch.setenv("ADMIN_USERNAME", "office")
     monkeypatch.setenv("ADMIN_PASSWORD", "secret")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
     import bot
-    return TestClient(bot.app)
+    # follow_redirects=False so we can assert 307/303 directly.
+    return TestClient(bot.app, follow_redirects=False)
 
 
 @pytest.fixture
@@ -23,12 +25,22 @@ def client_unconfigured(monkeypatch):
     monkeypatch.setenv("ADMIN_USERNAME", "")
     monkeypatch.setenv("ADMIN_PASSWORD", "")
     import bot
-    return TestClient(bot.app)
+    return TestClient(bot.app, follow_redirects=False)
 
 
 def _auth(user: str, pw: str) -> dict[str, str]:
+    """HTTP Basic Auth header (still supported as a fallback for scripts/curl)."""
     token = b64encode(f"{user}:{pw}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
+
+
+def _login(client) -> None:
+    """POST the login form so the test client picks up the session cookie."""
+    r = client.post(
+        "/admin/login",
+        data={"username": "office", "password": "secret", "next": "/admin/"},
+    )
+    assert r.status_code == 303, f"expected login to redirect, got {r.status_code}"
 
 
 # ─── Shared row fixtures ────────────────────────────────────────────────────
@@ -113,20 +125,107 @@ def mock_db_home(fake_complaints):
 
 # ─── Auth ───────────────────────────────────────────────────────────────────
 
-def test_admin_returns_401_without_auth(client):
+def test_unauthenticated_admin_request_redirects_to_login(client):
+    """No cookie, no Basic Auth → 307 to the styled login page."""
     r = client.get("/admin/tickets")
-    assert r.status_code == 401
-    assert r.headers.get("WWW-Authenticate") == "Basic"
-
-
-def test_admin_returns_401_with_wrong_credentials(client):
-    r = client.get("/admin/tickets", headers=_auth("office", "WRONG"))
-    assert r.status_code == 401
+    assert r.status_code == 307
+    assert r.headers.get("location") == "/admin/login"
 
 
 def test_admin_returns_503_when_env_not_configured(client_unconfigured):
     r = client_unconfigured.get("/admin/tickets", headers=_auth("anything", "anything"))
     assert r.status_code == 503
+
+
+# ─── Backwards-compat: HTTP Basic still works for scripts/curl ──────────────
+
+def test_basic_auth_with_correct_credentials_still_works(client, mock_db_tickets):
+    r = client.get("/admin/tickets", headers=_auth("office", "secret"))
+    assert r.status_code == 200
+
+
+def test_basic_auth_with_wrong_credentials_redirects_to_login(client):
+    r = client.get("/admin/tickets", headers=_auth("office", "WRONG"))
+    assert r.status_code == 307
+    assert r.headers["location"] == "/admin/login"
+
+
+# ─── Login form ─────────────────────────────────────────────────────────────
+
+def test_login_get_renders_styled_form(client):
+    r = client.get("/admin/login")
+    assert r.status_code == 200
+    body = r.text
+    # Form fields
+    assert 'name="username"' in body
+    assert 'name="password"' in body
+    assert 'name="next"' in body
+    # Styled with the Civic Vellum theme (seal + brand)
+    assert "/assets/mymla_profile_512.png" in body
+    assert "Office Console" in body
+
+
+def test_login_get_503_when_admin_env_unset(client_unconfigured):
+    r = client_unconfigured.get("/admin/login")
+    assert r.status_code == 503
+
+
+def test_login_post_with_good_credentials_sets_cookie_and_redirects(client):
+    r = client.post(
+        "/admin/login",
+        data={"username": "office", "password": "secret", "next": "/admin/"},
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/"
+    # Cookie was set on the test client.
+    assert "mymla_admin_session" in client.cookies
+
+
+def test_login_post_with_bad_credentials_returns_401_with_error_text(client):
+    r = client.post(
+        "/admin/login",
+        data={"username": "office", "password": "WRONG", "next": "/admin/"},
+    )
+    assert r.status_code == 401
+    assert "Invalid username or password" in r.text
+    # No cookie was set.
+    assert "mymla_admin_session" not in client.cookies
+
+
+def test_login_post_rejects_external_next_path(client):
+    """`next` must point inside /admin to prevent open redirects."""
+    r = client.post(
+        "/admin/login",
+        data={"username": "office", "password": "secret",
+              "next": "https://evil.example.com/"},
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/"
+
+
+# ─── Session cookie auth ────────────────────────────────────────────────────
+
+def test_authenticated_request_with_session_cookie_returns_200(client, mock_db_tickets):
+    _login(client)
+    r = client.get("/admin/tickets")
+    assert r.status_code == 200
+
+
+def test_logout_clears_cookie_and_redirects_to_login(client):
+    _login(client)
+    assert "mymla_admin_session" in client.cookies
+    r = client.get("/admin/logout")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/login"
+    assert "mymla_admin_session" not in client.cookies
+
+
+def test_login_get_skips_form_when_already_signed_in(client):
+    _login(client)
+    r = client.get("/admin/login")
+    # Already authenticated → 303 to default /admin/
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/"
 
 
 # ─── Layout / sidebar ───────────────────────────────────────────────────────

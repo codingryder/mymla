@@ -1,8 +1,9 @@
 """Phase 3 — MLA office admin console.
 
 Read-only viewer + future status updaters for citizen submissions. Locked behind
-HTTP Basic Auth from ADMIN_USERNAME + ADMIN_PASSWORD env vars; fail-closed
-(503) when either is blank.
+form-based session auth (signed cookie) with HTTP Basic Auth as a backwards-
+compat fallback for scripts/curl. Both validate against ADMIN_USERNAME +
+ADMIN_PASSWORD env vars; fail-closed (503) when either is blank.
 
 Visual design follows assets/PHILOSOPHY.md (Civic Vellum):
   - One teal (#0B4E56) — monsoon-darkened brass
@@ -12,22 +13,30 @@ Visual design follows assets/PHILOSOPHY.md (Civic Vellum):
   - "Engraved, not drawn" — the dashboard should feel like an *office*, not a SaaS
 
 Routes:
-  GET /admin/         dashboard home — KPIs + charts + latest tickets
-  GET /admin/tickets  paginated complaint table with filters
+  GET  /admin/         dashboard home — KPIs + charts + latest tickets
+  GET  /admin/tickets  paginated complaint table with filters
+  GET  /admin/login    styled sign-in form
+  POST /admin/login    validate + set session cookie
+  GET  /admin/logout   clear session cookie
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import html
+import json
 import os
 import secrets
-from collections import Counter
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 import psycopg2.extras
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import db
@@ -35,7 +44,7 @@ import wards as W
 
 
 router = APIRouter(prefix="/admin")
-_security = HTTPBasic(auto_error=True)
+_basic = HTTPBasic(auto_error=False)  # don't auto-401; we want session-first auth
 
 
 # ─── Brand palette (Civic Vellum) ───────────────────────────────────────────
@@ -53,26 +62,87 @@ BORDER     = "#E6DFCF"
 
 # ─── Auth ───────────────────────────────────────────────────────────────────
 
+_COOKIE_NAME = "mymla_admin_session"
+_SESSION_TTL_S = 12 * 3600
+
+
 def _admin_credentials() -> tuple[str, str]:
     return os.environ.get("ADMIN_USERNAME", ""), os.environ.get("ADMIN_PASSWORD", "")
 
 
-def _verify_admin(credentials: HTTPBasicCredentials = Depends(_security)) -> str:
+def _session_secret() -> str:
+    """Secret used to sign the session cookie. Falls back to META_APP_SECRET so
+    we don't require a new env var; both must be set in production anyway."""
+    return os.environ.get("SESSION_SECRET") or os.environ.get("META_APP_SECRET", "")
+
+
+def _sign_session(username: str) -> str:
+    """Sign a session token: base64url(payload).short_hmac. Includes a timestamp
+    so we can age-check on read."""
+    secret = _session_secret()
+    payload = json.dumps({"u": username, "t": int(time.time())}, separators=(",", ":"))
+    body = base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+    sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{body}.{sig}"
+
+
+def _read_session(token: Optional[str]) -> Optional[str]:
+    if not token or "." not in token:
+        return None
+    secret = _session_secret()
+    if not secret:
+        return None
+    body, _, sig = token.partition(".")
+    expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        padded = body + "=" * (-len(body) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except (binascii.Error, ValueError, json.JSONDecodeError):
+        return None
+    if int(time.time()) - int(payload.get("t", 0)) > _SESSION_TTL_S:
+        return None
+    return payload.get("u")
+
+
+def _credentials_match(user: str, pw: str) -> bool:
+    expected_user, expected_pass = _admin_credentials()
+    if not expected_user or not expected_pass:
+        return False
+    return (secrets.compare_digest(user, expected_user)
+            and secrets.compare_digest(pw, expected_pass))
+
+
+def _require_admin(
+    request: Request,
+    credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
+) -> str:
+    """Auth gate for every admin page.
+
+    Order of attempts:
+      1. Signed session cookie set by /admin/login
+      2. HTTP Basic Auth header (for scripts/curl)
+      3. Otherwise: 307 redirect to /admin/login (or 503 if admin env unset)
+    """
     expected_user, expected_pass = _admin_credentials()
     if not expected_user or not expected_pass:
         raise HTTPException(status_code=503, detail="admin not configured")
 
-    correct = (
-        secrets.compare_digest(credentials.username, expected_user)
-        and secrets.compare_digest(credentials.password, expected_pass)
+    # 1. session cookie
+    user = _read_session(request.cookies.get(_COOKIE_NAME))
+    if user:
+        return user
+
+    # 2. HTTP Basic Auth
+    if credentials and _credentials_match(credentials.username, credentials.password):
+        return credentials.username
+
+    # 3. send to the styled login form
+    raise HTTPException(
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Location": "/admin/login"},
     )
-    if not correct:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="bad credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
 
 
 # ─── Small utilities ────────────────────────────────────────────────────────
@@ -355,6 +425,78 @@ tr:hover td {{ background: rgba(11,78,86,0.025); }}
 }}
 .sparkline-axis span {{ text-align: center; }}
 
+/* ─── Sidebar foot (sign out) ────────────────────────────────────────────── */
+.sidebar-foot {{
+  margin-top: 24px; padding: 16px 24px 0;
+  border-top: 1px solid rgba(245,241,232,0.12);
+}}
+.sidebar-foot .signout {{
+  color: rgba(245,241,232,0.6); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 1.4px;
+  text-decoration: none;
+}}
+.sidebar-foot .signout:hover {{ color: var(--gold); }}
+
+/* ─── Login page ─────────────────────────────────────────────────────────── */
+.login-body {{
+  margin: 0; min-height: 100vh; background: var(--teal);
+  background-image:
+    radial-gradient(ellipse at top, rgba(245,241,232,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse at bottom, rgba(5,43,48,0.6) 0%, transparent 60%);
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px 16px;
+  color: var(--text);
+}}
+.login-shell {{ width: 100%; max-width: 380px; }}
+.login-card {{
+  background: var(--ivory); border: 1px solid var(--border);
+  border-radius: 4px; padding: 36px 32px 26px;
+  position: relative;
+}}
+.login-card::before {{
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+  background: var(--gold);
+}}
+.login-brand {{ text-align: center; margin-bottom: 28px; }}
+.login-brand img {{ width: 88px; height: 88px; border-radius: 50%; display: block; margin: 0 auto 14px; }}
+.login-title {{
+  font-size: 16px; font-weight: 600; color: var(--teal);
+  letter-spacing: 2.4px; text-transform: uppercase;
+}}
+.login-subtitle {{
+  font-size: 10.5px; color: var(--text-muted); letter-spacing: 1.6px;
+  text-transform: uppercase; margin-top: 4px;
+}}
+.login-form {{ display: flex; flex-direction: column; gap: 14px; }}
+.login-form label {{ display: flex; flex-direction: column; gap: 6px; }}
+.login-form label span {{
+  font-size: 10.5px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 1.3px;
+}}
+.login-form input {{
+  padding: 10px 12px; font-size: 14px; color: var(--text);
+  background: #FFFDF8; border: 1px solid var(--border); border-radius: 3px;
+  outline: none; font-family: inherit;
+}}
+.login-form input:focus {{ border-color: var(--teal); }}
+.login-form button {{
+  margin-top: 8px; padding: 11px 16px;
+  background: var(--teal); color: var(--ivory);
+  border: 1px solid var(--teal); border-radius: 3px;
+  font-size: 12px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; cursor: pointer; font-family: inherit;
+}}
+.login-form button:hover {{ background: var(--teal-dark); }}
+.login-error {{
+  padding: 10px 12px; background: #FFE8E0; color: #8B2C18;
+  border: 1px solid #E8B8A8; border-radius: 3px;
+  font-size: 12.5px; margin-bottom: 4px;
+}}
+.login-footnote {{
+  margin-top: 24px; text-align: center; font-size: 10.5px;
+  color: var(--text-muted); letter-spacing: 1.1px; text-transform: uppercase;
+}}
+
 /* ─── Table responsive wrapper ───────────────────────────────────────────── */
 .table-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
 .table-scroll table {{ min-width: 720px; }}
@@ -447,6 +589,9 @@ def _sidebar(active: str) -> str:
   <nav class="nav">
     {''.join(items)}
   </nav>
+  <div class="sidebar-foot">
+    <a href="/admin/logout" class="signout">Sign out</a>
+  </div>
 </aside>
 """
 
@@ -680,10 +825,101 @@ def render_tickets(rows: list[dict[str, Any]], status_filter: str,
                    active="tickets", signed_in_as=signed_in_as)
 
 
+# ─── Login page rendering ───────────────────────────────────────────────────
+
+def render_login(error: Optional[str] = None, next_path: str = "/admin/") -> str:
+    err_block = (
+        f'<div class="login-error">{_esc(error)}</div>' if error else ""
+    )
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MyMLA — Sign in</title>
+<style>{_CSS}</style>
+</head>
+<body class="login-body">
+<main class="login-shell">
+  <div class="login-card">
+    <div class="login-brand">
+      <img src="/assets/mymla_profile_512.png" alt="MyMLA seal" />
+      <div class="login-title">MyMLA</div>
+      <div class="login-subtitle">Office Console</div>
+    </div>
+    <form method="post" action="/admin/login" class="login-form">
+      <input type="hidden" name="next" value="{_esc(next_path)}" />
+      {err_block}
+      <label>
+        <span>Username</span>
+        <input name="username" autocomplete="username" autofocus required />
+      </label>
+      <label>
+        <span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="login-footnote">Authorised access only · MyMLA Constituency Office</div>
+  </div>
+</main>
+</body></html>"""
+
+
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
+@router.get("/login", response_class=HTMLResponse)
+def admin_login_form(request: Request, error: Optional[str] = None,
+                     next: str = "/admin/") -> Any:
+    expected_user, expected_pass = _admin_credentials()
+    if not expected_user or not expected_pass:
+        raise HTTPException(status_code=503, detail="admin not configured")
+    # If already signed in, skip straight to the dashboard.
+    if _read_session(request.cookies.get(_COOKIE_NAME)):
+        return RedirectResponse(url=next or "/admin/", status_code=303)
+    return HTMLResponse(render_login(error=error, next_path=next or "/admin/"))
+
+
+@router.post("/login")
+def admin_login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/admin/"),
+) -> Response:
+    expected_user, expected_pass = _admin_credentials()
+    if not expected_user or not expected_pass:
+        raise HTTPException(status_code=503, detail="admin not configured")
+    if not _credentials_match(username, password):
+        # Re-render the form with an error; keep username out of the cookie.
+        return HTMLResponse(
+            render_login(error="Invalid username or password.",
+                         next_path=next or "/admin/"),
+            status_code=401,
+        )
+    # Constrain `next` to internal paths only.
+    target = next if next and next.startswith("/admin") else "/admin/"
+    response = RedirectResponse(url=target, status_code=303)
+    response.set_cookie(
+        key=_COOKIE_NAME,
+        value=_sign_session(username),
+        max_age=_SESSION_TTL_S,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+@router.get("/logout")
+def admin_logout() -> Response:
+    response = RedirectResponse(url="/admin/login", status_code=303)
+    response.delete_cookie(_COOKIE_NAME, path="/")
+    return response
+
+
 @router.get("/", response_class=HTMLResponse)
-def admin_home(_user: str = Depends(_verify_admin)) -> str:
+def admin_home(_user: str = Depends(_require_admin)) -> str:
     return render_home(signed_in_as=_user)
 
 
@@ -692,7 +928,7 @@ def admin_tickets(
     status: str = Query("OPEN"),
     ward_id: Optional[int] = Query(None),
     limit: int = Query(50, ge=1, le=500),
-    _user: str = Depends(_verify_admin),
+    _user: str = Depends(_require_admin),
 ) -> str:
     rows = fetch_tickets(status_filter=status, ward_id=ward_id, limit=limit)
     counts = fetch_counts_by_status()
