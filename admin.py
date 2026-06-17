@@ -354,6 +354,67 @@ tr:hover td {{ background: rgba(11,78,86,0.025); }}
   font-variant-numeric: tabular-nums;
 }}
 .sparkline-axis span {{ text-align: center; }}
+
+/* ─── Table responsive wrapper ───────────────────────────────────────────── */
+.table-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+.table-scroll table {{ min-width: 720px; }}
+
+/* ─── Tablet ─────────────────────────────────────────────────────────────── */
+@media (max-width: 960px) {{
+  .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
+  .row {{ grid-template-columns: 1fr; }}
+}}
+
+/* ─── Mobile ─────────────────────────────────────────────────────────────── */
+@media (max-width: 720px) {{
+  .layout {{ grid-template-columns: 1fr; grid-template-rows: auto 1fr; }}
+  .sidebar {{
+    position: static; height: auto; padding: 14px 16px;
+    border-right: none; border-bottom: 1px solid var(--teal-deep);
+  }}
+  .sidebar .brand {{
+    display: flex; align-items: center; gap: 12px;
+    text-align: left; padding: 0 0 12px;
+    border-bottom: 1px solid rgba(245,241,232,0.12);
+  }}
+  .sidebar .brand img {{ width: 40px; height: 40px; margin: 0; }}
+  .sidebar .brand .name {{ font-size: 13px; letter-spacing: 1.8px; margin: 0; flex: 1; }}
+  .sidebar .brand .tagline {{ display: none; }}
+  .nav {{
+    margin-top: 10px; display: flex; gap: 4px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }}
+  .nav a {{
+    padding: 8px 14px; border-left: none; border-bottom: 3px solid transparent;
+    white-space: nowrap; font-size: 13px;
+  }}
+  .nav a.active {{ border-left-color: transparent; border-bottom-color: var(--gold); }}
+  .nav a.disabled {{ display: none; }}    /* hide SOON items on mobile to reduce noise */
+  .nav .badge-soon {{ display: none; }}
+
+  .main {{ padding: 20px 16px 40px; }}
+  .topbar {{ flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 20px; }}
+  .topbar h1 {{ font-size: 19px; }}
+
+  .kpi-grid {{ grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }}
+  .kpi {{ padding: 14px 14px 14px 18px; }}
+  .kpi .value {{ font-size: 24px; }}
+
+  .card {{ padding: 16px 16px; }}
+  .card h2 {{ font-size: 12.5px; }}
+  .card h2 .qualifier {{ display: block; margin-left: 0; margin-top: 2px; }}
+
+  .bars .row-bar {{ grid-template-columns: 110px 1fr 40px; gap: 8px; font-size: 12px; }}
+
+  .filters {{ gap: 6px; }}
+  .filters a {{ padding: 5px 9px; font-size: 10.5px; }}
+}}
+
+/* ─── Very narrow phones ─────────────────────────────────────────────────── */
+@media (max-width: 380px) {{
+  .kpi-grid {{ grid-template-columns: 1fr; }}
+  .bars .row-bar {{ grid-template-columns: 90px 1fr 32px; }}
+}}
 """
 
 
@@ -394,6 +455,7 @@ def _layout(title: str, page_title: str, body: str, active: str, signed_in_as: s
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>MyMLA — {_esc(title)}</title>
 <style>{_CSS}</style>
 </head>
@@ -602,7 +664,11 @@ def render_tickets(rows: list[dict[str, Any]], status_filter: str,
     )) + "</tr>"
 
     if rows:
-        body = '<table>' + header + "".join(_ticket_row(r) for r in rows) + '</table>'
+        body = (
+            '<div class="table-scroll"><table>'
+            + header + "".join(_ticket_row(r) for r in rows)
+            + '</table></div>'
+        )
     else:
         body = '<div class="empty">No tickets match this filter.</div>'
 
