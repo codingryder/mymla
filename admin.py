@@ -1,14 +1,19 @@
-"""Phase 3 — MLA office admin tooling (BRD scope-extension).
+"""Phase 3 — MLA office admin console.
 
-Read-only ticket / meeting / event viewer for the MLA's office to triage
-citizen submissions. Mounted under `/admin/*`, locked behind HTTP Basic Auth
-sourced from ADMIN_USERNAME + ADMIN_PASSWORD env vars.
+Read-only viewer + future status updaters for citizen submissions. Locked behind
+HTTP Basic Auth from ADMIN_USERNAME + ADMIN_PASSWORD env vars; fail-closed
+(503) when either is blank.
 
-If those env vars aren't set on the host, the admin returns 503 to every
-request — fail-closed, not fail-open.
+Visual design follows assets/PHILOSOPHY.md (Civic Vellum):
+  - One teal (#0B4E56) — monsoon-darkened brass
+  - One warm ivory (#F5F1E8) — old paper, softened
+  - One barely-gold (#D2BB84) — the held breath, used only as a hairline
+  - No gradients, no shadows beyond a single hairline border
+  - "Engraved, not drawn" — the dashboard should feel like an *office*, not a SaaS
 
-Later phases will add: status updaters (3.2), schedule editor (3.3), location
-updater (3.4), outbound notifications when status changes (3.5).
+Routes:
+  GET /admin/         dashboard home — KPIs + charts + latest tickets
+  GET /admin/tickets  paginated complaint table with filters
 """
 
 from __future__ import annotations
@@ -16,8 +21,9 @@ from __future__ import annotations
 import html
 import os
 import secrets
-from datetime import datetime
-from typing import Any, Optional
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Iterable, Optional
 
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,10 +31,24 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import db
+import wards as W
 
 
 router = APIRouter(prefix="/admin")
 _security = HTTPBasic(auto_error=True)
+
+
+# ─── Brand palette (Civic Vellum) ───────────────────────────────────────────
+
+TEAL       = "#0B4E56"
+TEAL_DARK  = "#073A40"
+TEAL_DEEP  = "#052B30"
+IVORY      = "#F5F1E8"
+IVORY_PAGE = "#FAF7EE"
+GOLD       = "#D2BB84"
+TEXT       = "#1F2A2C"
+TEXT_MUTED = "#6B7676"
+BORDER     = "#E6DFCF"
 
 
 # ─── Auth ───────────────────────────────────────────────────────────────────
@@ -40,7 +60,6 @@ def _admin_credentials() -> tuple[str, str]:
 def _verify_admin(credentials: HTTPBasicCredentials = Depends(_security)) -> str:
     expected_user, expected_pass = _admin_credentials()
     if not expected_user or not expected_pass:
-        # Fail-closed when the admin hasn't been configured at all.
         raise HTTPException(status_code=503, detail="admin not configured")
 
     correct = (
@@ -56,70 +75,7 @@ def _verify_admin(credentials: HTTPBasicCredentials = Depends(_security)) -> str
     return credentials.username
 
 
-# ─── Data access ────────────────────────────────────────────────────────────
-
-def fetch_tickets(
-    status_filter: Optional[str] = None,
-    ward_id: Optional[int] = None,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Read complaints with optional filters. status_filter='ALL' or None means no filter."""
-    where: list[str] = []
-    args: list[Any] = []
-    if status_filter and status_filter.upper() != "ALL":
-        where.append("status = %s")
-        args.append(status_filter.upper())
-    if ward_id is not None:
-        where.append("ward_id = %s")
-        args.append(ward_id)
-
-    sql = "SELECT * FROM mymla_complaints"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC LIMIT %s"
-    args.append(limit)
-
-    conn = db.get_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, args)
-        return [dict(r) for r in cur.fetchall()]
-
-
-def fetch_counts_by_status() -> dict[str, int]:
-    """Cheap status summary for the filter bar."""
-    conn = db.get_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT status, COUNT(*) FROM mymla_complaints GROUP BY status")
-        return {row[0]: row[1] for row in cur.fetchall()}
-
-
-# ─── Rendering ──────────────────────────────────────────────────────────────
-
-_CSS = """
-body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #1a1a1a; }
-h1 { font-size: 22px; margin-bottom: 4px; }
-.subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
-.filters { margin: 16px 0; font-size: 13px; }
-.filters a { margin-right: 12px; padding: 4px 10px; border: 1px solid #ddd;
-    border-radius: 6px; text-decoration: none; color: #1a1a1a; }
-.filters a.active { background: #1a4480; color: #fff; border-color: #1a4480; }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { border: 1px solid #e5e5e5; padding: 6px 10px; text-align: left;
-    vertical-align: top; }
-th { background: #f5f7fa; font-weight: 600; }
-tr:hover td { background: #fafbfc; }
-.ticket-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
-    display: inline-block; }
-.status-OPEN     { background: #fff3cd; color: #856404; }
-.status-IN_PROGRESS { background: #cce5ff; color: #004085; }
-.status-RESOLVED { background: #d4edda; color: #155724; }
-.status-CLOSED   { background: #e2e3e5; color: #383d41; }
-.desc { max-width: 380px; }
-.muted { color: #777; }
-.empty { padding: 40px; text-align: center; color: #888; }
-"""
-
+# ─── Small utilities ────────────────────────────────────────────────────────
 
 def _esc(value: Any) -> str:
     return html.escape("" if value is None else str(value))
@@ -137,25 +93,488 @@ def _truncate(text: Optional[str], n: int = 120) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _query_all(sql: str, args: Iterable[Any] = ()) -> list[dict[str, Any]]:
+    conn = db.get_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, list(args))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _query_one(sql: str, args: Iterable[Any] = ()) -> dict[str, Any] | None:
+    rows = _query_all(sql, args)
+    return rows[0] if rows else None
+
+
+# ─── Data access ────────────────────────────────────────────────────────────
+
+def fetch_tickets(
+    status_filter: Optional[str] = None,
+    ward_id: Optional[int] = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    where: list[str] = []
+    args: list[Any] = []
+    if status_filter and status_filter.upper() != "ALL":
+        where.append("status = %s")
+        args.append(status_filter.upper())
+    if ward_id is not None:
+        where.append("ward_id = %s")
+        args.append(ward_id)
+
+    sql = "SELECT * FROM mymla_complaints"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    args.append(limit)
+    return _query_all(sql, args)
+
+
+def fetch_counts_by_status() -> dict[str, int]:
+    rows = _query_all("SELECT status, COUNT(*) AS n FROM mymla_complaints GROUP BY status")
+    return {(r["status"] or "OPEN"): int(r["n"]) for r in rows}
+
+
+def fetch_counts_by_category(days: int = 30) -> list[tuple[str, int]]:
+    rows = _query_all(
+        """
+        SELECT COALESCE(category, '—') AS category, COUNT(*) AS n
+        FROM mymla_complaints
+        WHERE created_at >= NOW() - %s::interval
+        GROUP BY 1
+        ORDER BY 2 DESC
+        """,
+        (f"{int(days)} days",),
+    )
+    return [(r["category"], int(r["n"])) for r in rows]
+
+
+def fetch_top_wards(limit: int = 5) -> list[tuple[int, int]]:
+    rows = _query_all(
+        """
+        SELECT ward_id, COUNT(*) AS n
+        FROM mymla_complaints
+        WHERE ward_id IS NOT NULL
+        GROUP BY ward_id
+        ORDER BY n DESC, ward_id ASC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return [(int(r["ward_id"]), int(r["n"])) for r in rows]
+
+
+def fetch_daily_counts(days: int = 14) -> list[tuple[date, int]]:
+    rows = _query_all(
+        """
+        SELECT DATE(created_at AT TIME ZONE 'UTC') AS d, COUNT(*) AS n
+        FROM mymla_complaints
+        WHERE created_at >= (NOW() - %s::interval)
+        GROUP BY 1 ORDER BY 1 ASC
+        """,
+        (f"{int(days)} days",),
+    )
+    found = {r["d"]: int(r["n"]) for r in rows}
+    today = datetime.now(timezone.utc).date()
+    series: list[tuple[date, int]] = []
+    for offset in range(days - 1, -1, -1):
+        d = today - timedelta(days=offset)
+        series.append((d, found.get(d, 0)))
+    return series
+
+
+def fetch_citizen_count() -> int:
+    row = _query_one("SELECT COUNT(*) AS n FROM mymla_users")
+    return int(row["n"]) if row else 0
+
+
+def fetch_resolved_last_n_days(days: int = 7) -> int:
+    row = _query_one(
+        """
+        SELECT COUNT(*) AS n
+        FROM mymla_complaints
+        WHERE status = 'RESOLVED' AND created_at >= (NOW() - %s::interval)
+        """,
+        (f"{int(days)} days",),
+    )
+    return int(row["n"]) if row else 0
+
+
+# ─── Layout shell ───────────────────────────────────────────────────────────
+
+_CSS = f"""
+:root {{
+  --teal: {TEAL};
+  --teal-dark: {TEAL_DARK};
+  --teal-deep: {TEAL_DEEP};
+  --ivory: {IVORY};
+  --ivory-page: {IVORY_PAGE};
+  --gold: {GOLD};
+  --text: {TEXT};
+  --text-muted: {TEXT_MUTED};
+  --border: {BORDER};
+}}
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 0; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  background: var(--ivory-page);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}}
+
+/* ─── Layout ───────────────────────────────────────────────────────────── */
+.layout {{ display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }}
+
+.sidebar {{
+  background: var(--teal);
+  color: var(--ivory);
+  padding: 28px 0;
+  border-right: 1px solid var(--teal-deep);
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}}
+.brand {{ text-align: center; padding: 0 20px 24px; border-bottom: 1px solid rgba(245,241,232,0.12); }}
+.brand img {{ width: 96px; height: 96px; border-radius: 50%; display: block; margin: 0 auto 12px; }}
+.brand .name {{
+  font-size: 14px; letter-spacing: 2.2px; text-transform: uppercase;
+  font-weight: 600; color: var(--ivory);
+}}
+.brand .tagline {{
+  font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase;
+  color: var(--gold); margin-top: 4px;
+}}
+.nav {{ margin-top: 16px; }}
+.nav a {{
+  display: block; padding: 11px 24px;
+  color: rgba(245,241,232,0.78);
+  text-decoration: none; font-size: 13px;
+  border-left: 3px solid transparent;
+}}
+.nav a:hover {{ background: var(--teal-dark); color: var(--ivory); }}
+.nav a.active {{
+  background: var(--teal-dark); color: var(--ivory);
+  border-left-color: var(--gold);
+}}
+.nav a.disabled {{ color: rgba(245,241,232,0.32); cursor: default; pointer-events: none; }}
+.nav .badge-soon {{
+  float: right; font-size: 9px; letter-spacing: 1px;
+  background: rgba(245,241,232,0.08); color: var(--gold);
+  padding: 2px 6px; border-radius: 3px; margin-top: 2px;
+}}
+
+.main {{ padding: 32px 40px 60px; }}
+.topbar {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 28px; padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}}
+.topbar h1 {{ font-size: 22px; margin: 0; color: var(--teal); font-weight: 600; letter-spacing: -0.2px; }}
+.topbar .signed-in {{ color: var(--text-muted); font-size: 12px; }}
+.topbar .signed-in b {{ color: var(--text); }}
+
+/* ─── Cards & grids ──────────────────────────────────────────────────────── */
+.kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }}
+.kpi {{
+  background: var(--ivory); border: 1px solid var(--border); padding: 18px 20px; border-radius: 4px;
+  position: relative;
+}}
+.kpi::before {{
+  content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px;
+  background: var(--gold);
+}}
+.kpi .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-muted); }}
+.kpi .value {{ font-size: 30px; font-weight: 600; color: var(--teal); margin-top: 6px; }}
+.kpi .hint {{ font-size: 11px; color: var(--text-muted); margin-top: 4px; }}
+
+.row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }}
+.row.full {{ grid-template-columns: 1fr; }}
+.card {{
+  background: var(--ivory); border: 1px solid var(--border); border-radius: 4px;
+  padding: 20px 22px;
+}}
+.card h2 {{
+  margin: 0 0 16px; font-size: 14px; text-transform: uppercase; letter-spacing: 1.3px;
+  color: var(--teal); font-weight: 600;
+}}
+.card h2 .qualifier {{ color: var(--text-muted); text-transform: none; letter-spacing: 0;
+  font-weight: 400; font-size: 12px; margin-left: 8px; }}
+.empty {{ color: var(--text-muted); padding: 18px 0; font-style: italic; }}
+
+/* ─── Tables ─────────────────────────────────────────────────────────────── */
+table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+th, td {{ padding: 10px 12px; text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--border); }}
+th {{
+  background: transparent; font-weight: 600; color: var(--teal);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1.1px;
+}}
+tr:last-child td {{ border-bottom: none; }}
+tr:hover td {{ background: rgba(11,78,86,0.025); }}
+
+.ticket-id {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  color: var(--teal-dark); }}
+.muted {{ color: var(--text-muted); }}
+.desc {{ max-width: 380px; color: var(--text); }}
+
+.status {{
+  padding: 3px 9px; border-radius: 3px; font-size: 10px; font-weight: 700;
+  letter-spacing: 1.2px; text-transform: uppercase; display: inline-block;
+}}
+.status-OPEN        {{ background: #FFF1D6; color: #8B5A00; }}
+.status-IN_PROGRESS {{ background: #D8E6F0; color: #0F4E78; }}
+.status-RESOLVED    {{ background: #DCE9D6; color: #2F5B23; }}
+.status-CLOSED      {{ background: #E3DECF; color: #5C4F2E; }}
+
+/* ─── Filter bar ─────────────────────────────────────────────────────────── */
+.filters {{ margin: 0 0 18px; font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }}
+.filters a {{
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 3px;
+  text-decoration: none; color: var(--text); background: var(--ivory);
+  text-transform: uppercase; letter-spacing: 0.8px; font-size: 11px;
+}}
+.filters a:hover {{ border-color: var(--gold); }}
+.filters a.active {{ background: var(--teal); color: var(--ivory); border-color: var(--teal); }}
+.filters a .n {{ opacity: 0.6; margin-left: 4px; font-weight: 400; }}
+
+/* ─── Charts ─────────────────────────────────────────────────────────────── */
+.bars {{ width: 100%; }}
+.bars .row-bar {{ display: grid; grid-template-columns: 130px 1fr 50px;
+  align-items: center; gap: 10px; padding: 5px 0; font-size: 12.5px; }}
+.bars .label {{ color: var(--text); }}
+.bars .track {{ background: rgba(11,78,86,0.07); height: 14px; border-radius: 2px;
+  overflow: hidden; }}
+.bars .fill {{ background: var(--teal); height: 100%; }}
+.bars .n {{ color: var(--teal); font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }}
+
+.sparkline-wrap {{ }}
+.sparkline-axis {{
+  display: grid; grid-template-columns: repeat(var(--cols, 14), 1fr); gap: 4px;
+  margin-top: 10px; font-size: 10px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}}
+.sparkline-axis span {{ text-align: center; }}
+"""
+
+
+_NAV_ITEMS = [
+    ("home", "/admin/", "Home", False),
+    ("tickets", "/admin/tickets", "Tickets", False),
+    ("meetings", "#", "Meetings", True),
+    ("events", "#", "Events", True),
+    ("schedule", "#", "Schedule", True),
+    ("location", "#", "Location", True),
+]
+
+
+def _sidebar(active: str) -> str:
+    items: list[str] = []
+    for key, href, label, disabled in _NAV_ITEMS:
+        classes = ["active"] if key == active else []
+        if disabled:
+            classes.append("disabled")
+        cls = f' class="{" ".join(classes)}"' if classes else ""
+        suffix = '<span class="badge-soon">SOON</span>' if disabled else ""
+        items.append(f'<a href="{_esc(href)}"{cls}>{_esc(label)}{suffix}</a>')
+    return f"""
+<aside class="sidebar">
+  <div class="brand">
+    <img src="/assets/mymla_profile_512.png" alt="MyMLA seal" />
+    <div class="name">MyMLA</div>
+    <div class="tagline">Office Console</div>
+  </div>
+  <nav class="nav">
+    {''.join(items)}
+  </nav>
+</aside>
+"""
+
+
+def _layout(title: str, page_title: str, body: str, active: str, signed_in_as: str) -> str:
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8" />
+<title>MyMLA — {_esc(title)}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<div class="layout">
+  {_sidebar(active)}
+  <main class="main">
+    <div class="topbar">
+      <h1>{_esc(page_title)}</h1>
+      <div class="signed-in">Signed in as <b>{_esc(signed_in_as)}</b></div>
+    </div>
+    {body}
+  </main>
+</div>
+</body></html>"""
+
+
+# ─── Chart helpers (inline SVG / CSS) ───────────────────────────────────────
+
+def _bars(rows: list[tuple[str, int]], empty_msg: str = "No data yet.") -> str:
+    if not rows:
+        return f'<div class="empty">{_esc(empty_msg)}</div>'
+    max_n = max(n for _, n in rows) or 1
+    parts: list[str] = ['<div class="bars">']
+    for label, n in rows:
+        pct = round(100 * n / max_n)
+        parts.append(
+            '<div class="row-bar">'
+            f'<div class="label">{_esc(label)}</div>'
+            f'<div class="track"><div class="fill" style="width: {pct}%"></div></div>'
+            f'<div class="n">{_esc(n)}</div>'
+            '</div>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _sparkline(series: list[tuple[date, int]], width: int = 560, height: int = 80) -> str:
+    if not series:
+        return '<div class="empty">No tickets in the window.</div>'
+    n = len(series)
+    max_v = max((v for _, v in series), default=0) or 1
+    bar_w = (width - (n - 1) * 4) / n
+    bars: list[str] = []
+    for i, (_d, v) in enumerate(series):
+        x = i * (bar_w + 4)
+        h = (v / max_v) * (height - 8) if max_v else 0
+        y = height - h
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
+            f'rx="1" fill="{TEAL}" opacity="{0.45 + 0.55 * (v / max_v):.2f}"/>'
+        )
+    axis_labels = "".join(
+        f"<span>{d.strftime('%d')}</span>" for d, _ in series
+    )
+    return (
+        '<div class="sparkline-wrap">'
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        f'{"".join(bars)}'
+        '</svg>'
+        f'<div class="sparkline-axis" style="--cols:{n}">{axis_labels}</div>'
+        '</div>'
+    )
+
+
+# ─── Pages ──────────────────────────────────────────────────────────────────
+
+def _kpi(label: str, value: Any, hint: str = "") -> str:
+    return (
+        f'<div class="kpi">'
+        f'<div class="label">{_esc(label)}</div>'
+        f'<div class="value">{_esc(value)}</div>'
+        f'<div class="hint">{_esc(hint)}</div>'
+        '</div>'
+    )
+
+
+def render_home(signed_in_as: str) -> str:
+    counts = fetch_counts_by_status()
+    open_n = counts.get("OPEN", 0)
+    in_progress_n = counts.get("IN_PROGRESS", 0)
+    resolved_7d = fetch_resolved_last_n_days(7)
+    citizens = fetch_citizen_count()
+
+    by_cat = fetch_counts_by_category(30)
+    by_ward_raw = fetch_top_wards(5)
+    by_ward = [
+        (f"Ward {wid} — {W.ward_name(wid, 'eng') or '?'}", n) for wid, n in by_ward_raw
+    ]
+    daily = fetch_daily_counts(14)
+    latest = fetch_tickets(status_filter="ALL", limit=5)
+
+    kpis = "".join([
+        _kpi("Open tickets", open_n, "Awaiting first action"),
+        _kpi("In progress", in_progress_n, "Office working on it"),
+        _kpi("Resolved (7d)", resolved_7d, "Closed last 7 days"),
+        _kpi("Citizens onboarded", citizens, "Unique phone numbers"),
+    ])
+
+    by_cat_chart = _bars(by_cat, "No tickets in the last 30 days.")
+    by_ward_chart = _bars(by_ward, "No tickets with a ward yet.")
+    sparkline_svg = _sparkline(daily)
+
+    if latest:
+        latest_rows: list[str] = []
+        for r in latest:
+            ward_label = f"Ward {r.get('ward_id')}" if r.get("ward_id") is not None else "—"
+            status_value = (r.get("status") or "OPEN").upper()
+            latest_rows.append(
+                "<tr>"
+                f'<td class="ticket-id">{_esc(r.get("ticket_id"))}</td>'
+                f'<td>{_fmt_dt(r.get("created_at"))}</td>'
+                f'<td>{_esc(ward_label)}</td>'
+                f'<td>{_esc(r.get("category"))}</td>'
+                f'<td><span class="status status-{_esc(status_value)}">{_esc(status_value)}</span></td>'
+                "</tr>"
+            )
+        latest_table = (
+            '<table><thead><tr>'
+            '<th>Ticket</th><th>When</th><th>Ward</th>'
+            '<th>Category</th><th>Status</th>'
+            '</tr></thead><tbody>'
+            + "".join(latest_rows)
+            + '</tbody></table>'
+        )
+    else:
+        latest_table = '<div class="empty">No tickets filed yet.</div>'
+
+    body = f"""
+<div class="kpi-grid">{kpis}</div>
+
+<div class="row">
+  <div class="card">
+    <h2>Tickets by category <span class="qualifier">last 30 days</span></h2>
+    {by_cat_chart}
+  </div>
+  <div class="card">
+    <h2>Top wards by volume <span class="qualifier">all time</span></h2>
+    {by_ward_chart}
+  </div>
+</div>
+
+<div class="row full">
+  <div class="card">
+    <h2>Tickets per day <span class="qualifier">last 14 days</span></h2>
+    {sparkline_svg}
+  </div>
+</div>
+
+<div class="row full">
+  <div class="card">
+    <h2>Latest tickets <span class="qualifier">most recent 5</span></h2>
+    {latest_table}
+  </div>
+</div>
+"""
+    return _layout("Dashboard", "Dashboard", body, active="home", signed_in_as=signed_in_as)
+
+
 def _filter_bar(active: str, counts: dict[str, int]) -> str:
-    options = [("ALL", "All"), ("OPEN", "Open"), ("IN_PROGRESS", "In progress"),
-               ("RESOLVED", "Resolved"), ("CLOSED", "Closed")]
+    options = [
+        ("ALL", "All"), ("OPEN", "Open"), ("IN_PROGRESS", "In progress"),
+        ("RESOLVED", "Resolved"), ("CLOSED", "Closed"),
+    ]
     parts: list[str] = []
     for key, label in options:
         count = sum(counts.values()) if key == "ALL" else counts.get(key, 0)
         cls = "active" if active.upper() == key else ""
         parts.append(
             f'<a class="{cls}" href="/admin/tickets?status={key}">'
-            f'{_esc(label)} <span class="muted">({count})</span></a>'
+            f'{_esc(label)}<span class="n">{count}</span></a>'
         )
     return '<div class="filters">' + "".join(parts) + "</div>"
 
 
-def _row(row: dict[str, Any]) -> str:
+def _ticket_row(row: dict[str, Any]) -> str:
     description = _truncate(row.get("description_text"))
     voice = "🎙" if row.get("description_voice_url") else ""
     images = row.get("image_media_ids") or []
-    images_label = f"📷 ×{len(images)}" if images else ""
+    images_label = f"📷×{len(images)}" if images else ""
     media_cell = " ".join(filter(None, [voice, images_label])) or '<span class="muted">—</span>'
 
     status_value = (row.get("status") or "OPEN").upper()
@@ -175,46 +594,31 @@ def _row(row: dict[str, Any]) -> str:
     ]) + "</tr>"
 
 
-def render_tickets_page(rows: list[dict[str, Any]], status_filter: str,
-                        counts: dict[str, int]) -> str:
+def render_tickets(rows: list[dict[str, Any]], status_filter: str,
+                   counts: dict[str, int], signed_in_as: str) -> str:
     header = "<tr>" + "".join(f"<th>{c}</th>" for c in (
         "Ticket", "Created", "Ward / Booth", "Category", "Description",
         "Media", "Phone", "Status",
     )) + "</tr>"
 
     if rows:
-        body = header + "".join(_row(r) for r in rows)
-        table = f"<table>{body}</table>"
+        body = '<table>' + header + "".join(_ticket_row(r) for r in rows) + '</table>'
     else:
-        table = '<div class="empty">No tickets match this filter.</div>'
+        body = '<div class="empty">No tickets match this filter.</div>'
 
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>MyMLA — Tickets</title>
-<style>{_CSS}</style></head>
-<body>
-<h1>MyMLA — Citizen Complaints</h1>
-<div class="subtitle">{len(rows)} ticket(s) shown · filter: <b>{_esc(status_filter)}</b></div>
+    inner = f"""
 {_filter_bar(status_filter, counts)}
-{table}
-</body></html>
+<div class="card">{body}</div>
 """
+    return _layout("Tickets", "Citizen complaints", inner,
+                   active="tickets", signed_in_as=signed_in_as)
 
 
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
 def admin_home(_user: str = Depends(_verify_admin)) -> str:
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>MyMLA — Admin</title>
-<style>{_CSS}</style></head>
-<body>
-<h1>MyMLA — MLA Office Console</h1>
-<div class="subtitle">Signed in as <b>{_esc(_user)}</b></div>
-<ul>
-  <li><a href="/admin/tickets">📝 Citizen complaints</a></li>
-</ul>
-</body></html>
-"""
+    return render_home(signed_in_as=_user)
 
 
 @router.get("/tickets", response_class=HTMLResponse)
@@ -226,4 +630,4 @@ def admin_tickets(
 ) -> str:
     rows = fetch_tickets(status_filter=status, ward_id=ward_id, limit=limit)
     counts = fetch_counts_by_status()
-    return render_tickets_page(rows, status, counts)
+    return render_tickets(rows, status, counts, signed_in_as=_user)

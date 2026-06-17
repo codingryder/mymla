@@ -21,6 +21,7 @@ load_dotenv()  # populate os.environ before any module reads it
 
 from fastapi import BackgroundTasks, FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 import admin  # noqa: E402
 import cloud_api  # noqa: E402
@@ -32,6 +33,7 @@ import strings as S  # noqa: E402
 
 app = FastAPI(title="MyMLA WhatsApp Chatbot")
 app.include_router(admin.router)
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 
 # ─── Startup ────────────────────────────────────────────────────────────────
