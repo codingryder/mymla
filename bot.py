@@ -65,7 +65,16 @@ async def timing(request: Request, call_next):
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "mymla-bot", "ok": True}
+    # Touch the DB so uptime pings warm Neon's compute too, not just the web service.
+    db_ok = True
+    try:
+        with db.get_connection().cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    except Exception as e:
+        db_ok = False
+        print(f"[Healthcheck] DB warm-up failed: {type(e).__name__}: {e}", flush=True)
+    return {"service": "mymla-bot", "ok": True, "db": db_ok}
 
 
 # ─── Webhook verification (GET) ─────────────────────────────────────────────
