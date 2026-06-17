@@ -425,6 +425,11 @@ tr:hover td {{ background: rgba(11,78,86,0.025); }}
 }}
 .sparkline-axis span {{ text-align: center; }}
 
+/* ─── Mobile drawer toggle (pure CSS, no JS) ─────────────────────────────── */
+.nav-toggle {{ position: absolute; left: -9999px; opacity: 0; pointer-events: none; }}
+.nav-overlay {{ display: none; }}
+.mobile-header {{ display: none; }}
+
 /* ─── Sidebar foot (sign out) ────────────────────────────────────────────── */
 .sidebar-foot {{
   margin-top: 24px; padding: 16px 24px 0;
@@ -509,30 +514,64 @@ tr:hover td {{ background: rgba(11,78,86,0.025); }}
 
 /* ─── Mobile ─────────────────────────────────────────────────────────────── */
 @media (max-width: 720px) {{
-  .layout {{ grid-template-columns: 1fr; grid-template-rows: auto 1fr; }}
+  /* Layout collapses to a single column; sidebar becomes an off-canvas drawer. */
+  .layout {{ grid-template-columns: 1fr; }}
+
   .sidebar {{
-    position: static; height: auto; padding: 14px 16px;
-    border-right: none; border-bottom: 1px solid var(--teal-deep);
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: 260px; max-width: 80vw;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 100;
+    box-shadow: 0 0 0 transparent;
   }}
-  .sidebar .brand {{
+  .nav-toggle:checked ~ .layout .sidebar {{
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(5,43,48,0.35);
+  }}
+
+  /* Dimmed overlay covers content while drawer is open; tap-to-close. */
+  .nav-overlay {{
+    position: fixed; inset: 0; background: rgba(5,43,48,0.55);
+    z-index: 99; opacity: 0; pointer-events: none;
+    transition: opacity 0.22s ease;
+  }}
+  .nav-toggle:checked ~ .layout .nav-overlay {{
+    display: block; opacity: 1; pointer-events: auto;
+  }}
+
+  /* Mobile top bar with hamburger + small brand mark. */
+  .mobile-header {{
     display: flex; align-items: center; gap: 12px;
-    text-align: left; padding: 0 0 12px;
-    border-bottom: 1px solid rgba(245,241,232,0.12);
+    background: var(--teal); color: var(--ivory);
+    margin: -20px -16px 16px; padding: 12px 14px;
+    border-bottom: 1px solid var(--teal-deep);
   }}
-  .sidebar .brand img {{ width: 40px; height: 40px; margin: 0; }}
-  .sidebar .brand .name {{ font-size: 13px; letter-spacing: 1.8px; margin: 0; flex: 1; }}
-  .sidebar .brand .tagline {{ display: none; }}
-  .nav {{
-    margin-top: 10px; display: flex; gap: 4px;
-    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  .mobile-header .mobile-brand {{
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; letter-spacing: 1.8px; text-transform: uppercase;
+    font-weight: 600;
   }}
-  .nav a {{
-    padding: 8px 14px; border-left: none; border-bottom: 3px solid transparent;
-    white-space: nowrap; font-size: 13px;
+  .mobile-header .mobile-brand img {{
+    width: 28px; height: 28px; border-radius: 50%;
   }}
-  .nav a.active {{ border-left-color: transparent; border-bottom-color: var(--gold); }}
-  .nav a.disabled {{ display: none; }}    /* hide SOON items on mobile to reduce noise */
-  .nav .badge-soon {{ display: none; }}
+  /* Hamburger button: three ivory bars. Morphs to "×" when drawer is open. */
+  .hamburger {{
+    display: inline-flex; flex-direction: column; justify-content: center;
+    gap: 4px; width: 28px; height: 28px; padding: 4px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }}
+  .hamburger span {{
+    display: block; height: 2px; background: var(--ivory);
+    border-radius: 1px; transition: transform 0.22s ease, opacity 0.22s ease;
+  }}
+  .nav-toggle:checked ~ .layout .hamburger span:nth-child(1) {{
+    transform: translateY(6px) rotate(45deg);
+  }}
+  .nav-toggle:checked ~ .layout .hamburger span:nth-child(2) {{ opacity: 0; }}
+  .nav-toggle:checked ~ .layout .hamburger span:nth-child(3) {{
+    transform: translateY(-6px) rotate(-45deg);
+  }}
 
   .main {{ padding: 20px 16px 40px; }}
   .topbar {{ flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 20px; }}
@@ -605,9 +644,20 @@ def _layout(title: str, page_title: str, body: str, active: str, signed_in_as: s
 <style>{_CSS}</style>
 </head>
 <body>
+<input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" />
 <div class="layout">
   {_sidebar(active)}
+  <label for="nav-toggle" class="nav-overlay" aria-hidden="true"></label>
   <main class="main">
+    <header class="mobile-header">
+      <label for="nav-toggle" class="hamburger" aria-label="Toggle navigation">
+        <span></span><span></span><span></span>
+      </label>
+      <div class="mobile-brand">
+        <img src="/assets/mymla_profile_512.png" alt="" />
+        <span>MyMLA</span>
+      </div>
+    </header>
     <div class="topbar">
       <h1>{_esc(page_title)}</h1>
       <div class="signed-in">Signed in as <b>{_esc(signed_in_as)}</b></div>

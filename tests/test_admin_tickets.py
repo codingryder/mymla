@@ -255,6 +255,18 @@ def test_admin_tickets_renders_inside_layout(client, mock_db_tickets):
     assert ">Tickets<" in body
 
 
+def test_layout_includes_mobile_drawer_toggle(client, mock_db_home):
+    """Hamburger + checkbox + overlay are present so mobile drawer works without JS."""
+    r = client.get("/admin/", headers=_auth("office", "secret"))
+    body = r.text
+    assert 'id="nav-toggle"' in body
+    assert 'class="nav-overlay"' in body
+    assert 'class="hamburger"' in body
+    assert 'class="mobile-header"' in body
+    # The overlay label and hamburger label both target the same checkbox.
+    assert body.count('for="nav-toggle"') >= 2
+
+
 # ─── Dashboard home — KPIs + charts ─────────────────────────────────────────
 
 def test_home_renders_kpi_numbers(client, mock_db_home):
